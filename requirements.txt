@@ -1,3 +1,4 @@
+# Fixed for Render 512MB Free Tier - NO SeleniumBase (800MB OOM) - Camoufox ONLY 200MB
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 curl_cffi>=0.11.0

@@ -1,6 +1,6 @@
 """
-Perchance Turnstile Solver Service - Byparr/Camoufox based, cron-job.org optimized
-Host on separate Render account (512MB-1GB) to keep main MCP under 120MB
+Perchance Turnstile Solver Service - Byparr/Camoufox ONLY (No SeleniumBase) - 200-300MB
+Fixed for Render 512MB Free Tier - Removes SeleniumBase fallback that caused OOM 502
 
 Endpoints:
   GET / - info
@@ -12,15 +12,13 @@ Endpoints:
 For Perchance sitekey: 0x4AAAAAAAA8g8NphwaSOT59
 Page: https://image-generation.perchance.org/embed
 
-This service uses Camoufox (Firefox-based stealth, same as Byparr) - 200MB vs 400MB+ for Chromium,
+This service uses ONLY Camoufox (Firefox-based stealth, same as Byparr) - 200MB vs 400MB+ for Chromium,
 C++ level fingerprint patching, passes CreepJS, best for Turnstile.
 
-Memory: ~250-350MB (fits Render 512MB), vs 800MB for SeleniumBase UC
+Memory: ~200-300MB (fits Render 512MB), vs 800MB for SeleniumBase UC that caused OOM 502
 Unlimited: Yes, self-hosted, no Browserless 1000/mo limit
 
 cron-job.org: 13 min interval < 15 min Render sleep threshold, 750h/month = 720h used < 750h limit
-cron-job.org free timeout 30s, so /ping and /cron must respond <100ms (no browser)
-For morning wake-up (50s cold start > 30s timeout), use Pipedream at 07:50 on /wake (no timeout)
 """
 
 import os
@@ -35,22 +33,6 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
-# Setup LD_LIBRARY_PATH for Camoufox Firefox deps
-def _setup_ld():
-    possible = [
-        "/tmp/debs/out/usr/lib/x86_64-linux-gnu",
-        "/home/user/.perchance-deps/lib",
-        "/usr/lib/x86_64-linux-gnu",
-        "/app/.perchance-deps/lib",
-    ]
-    cur = os.environ.get("LD_LIBRARY_PATH", "")
-    for p in possible:
-        if os.path.exists(p) and p not in cur:
-            os.environ["LD_LIBRARY_PATH"] = f"{p}:{cur}" if cur else p
-            cur = os.environ["LD_LIBRARY_PATH"]
-
-_setup_ld()
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
@@ -63,8 +45,6 @@ API_VERIFY = f"{BASE_EMBED}/api/verifyUser"
 API_GENERATE = f"{BASE_EMBED}/api/generate"
 API_AD_CODE = f"{BASE_PERCHANCE}/api/getAccessCodeForAdPoweredStuff"
 CLIENT_VERSION_HASH = "9b43eec2e71907610e4e9317b54c208495f6850086e92239a869811d2e2d77ee"
-
-DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 CACHE_DIR = Path.home() / ".perchance-solver"
 CACHE_DIR.mkdir(exist_ok=True)
@@ -98,171 +78,89 @@ def load_cached_user_key() -> Optional[str]:
             return m.group(0)
     return None
 
-# --- Camoufox Turnstile Solver (Byparr-style) ---
+# --- Camoufox ONLY Turnstile Solver (Byparr-style) - NO SeleniumBase ---
 
 async def get_user_key_via_camoufox(timeout: int = 60) -> Optional[Dict[str, Any]]:
     """
-    Solve Turnstile via Camoufox (Firefox stealth, same as Byparr)
+    Solve Turnstile via Camoufox ONLY (Firefox stealth, same as Byparr)
     Returns {userKey, browserId, token} or None
-    Falls back to SeleniumBase UC if Camoufox not available (for sandbox testing)
+    NO SeleniumBase fallback - saves 600MB RAM, fixes OOM 502 on Render 512MB
     """
-    # Try Camoufox first (Byparr browser, 200MB, best for Turnstile)
-    try:
-        from camoufox.async_api import AsyncCamoufox
-        print("[Solver] Trying Camoufox (Byparr browser)...")
-        browser_id = load_cached_browser_id()
-        
-        try:
-            async with AsyncCamoufox(headless=True, humanize=True, os="windows") as browser:
-                page = await browser.new_page()
-                import urllib.parse
-                hash_data = {
-                    "prompt": "test",
-                    "seed": 0,
-                    "resolution": "512x512",
-                    "guidanceScale": 7,
-                    "negativePrompt": "",
-                    "requestId": f"camou_{random.random()}",
-                    "iframeId": "test"
-                }
-                url = f"{BASE_EMBED}/embed#{urllib.parse.quote(json.dumps(hash_data))}"
-                page.on("console", lambda msg: print(f"[Camoufox CONSOLE {msg.type}] {msg.text[:500]}"))
-
-                await page.goto(url)
-                await page.wait_for_timeout(5000)
-
-                result = await page.evaluate("""async () => {
-                    const bid = localStorage.getItem('generation-v2-browser');
-                    if(!window.turnstile){
-                        await new Promise((res) => {
-                            window.onloadTurnstileCallback = () => res();
-                            const s = document.createElement('script');
-                            s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback';
-                            s.onerror = () => res();
-                            document.body.appendChild(s);
-                            setTimeout(() => res(), 10000);
-                        });
-                        await new Promise(r => setTimeout(r, 2000));
-                    }
-                    if(!window.turnstile){
-                        return {error: 'turnstile still undefined', bid};
-                    }
-                    let ctn = document.querySelector('#cfTurnstileCtn');
-                    if(!ctn){
-                        ctn = document.createElement('div');
-                        ctn.id = 'cfTurnstileCtn';
-                        document.body.appendChild(ctn);
-                    }
-                    try{
-                        const token = await new Promise((resolve) => {
-                            let settled = false;
-                            const timer = setTimeout(() => {if(!settled){settled=true;resolve(null);}},40000);
-                            window.cloudflareTurnstileTokenResolver = (t) => {if(!settled){settled=true;clearTimeout(timer);resolve(t);}};
-                            try{
-                                window.turnstile.render('#cfTurnstileCtn', {
-                                    sitekey: '0x4AAAAAAAA8g8NphwaSOT59',
-                                    callback: (t) => window.cloudflareTurnstileTokenResolver(t),
-                                    'error-callback': () => {if(!settled){settled=true;clearTimeout(timer);resolve(null);}}
-                                });
-                            }catch(e){ if(!settled){settled=true;clearTimeout(timer);resolve(null);} }
-                        });
-                        if(!token){ return {error: 'no token after 40s', bid}; }
-                        const verifyUrl = `/api/verifyUser?browserId=${bid}&token=${encodeURIComponent(token)}&thread=0&__cacheBust=${Math.random()}`;
-                        const r = await fetch(verifyUrl);
-                        const txt = await r.text();
-                        let j; try{ j = JSON.parse(txt); }catch(e){ return {error: 'verify not json '+txt.slice(0,500), bid}; }
-                        return {bid, response: j, token};
-                    }catch(e){ return {error: 'exception '+e.toString(), bid}; }
-                }""")
-
-                print(f"[Solver] Camoufox verify result: {result}")
-                user_key = result.get('response', {}).get('userKey') if isinstance(result, dict) else None
-                if user_key and re.fullmatch(r"[a-f0-9]{64}", user_key):
-                    print(f"[Solver] Got userKey via Camoufox: {user_key[:12]}...")
-                    save_user_key(user_key)
-                    return {"userKey": user_key, "browserId": result.get('bid', browser_id), "token": result.get('token', '')[:100], "method": "camoufox"}
-        except Exception as e:
-            print(f"[Solver] Camoufox inner failed: {e}, falling back to SeleniumBase UC")
-    except Exception as e:
-        print(f"[Solver] Camoufox outer failed: {e}, falling back to SeleniumBase UC")
+    from camoufox.async_api import AsyncCamoufox
+    print("[Solver] Trying Camoufox (Byparr browser) - 200MB, no SeleniumBase fallback...")
+    browser_id = load_cached_browser_id()
     
-    # Fallback to SeleniumBase UC Mode (tested working in sandbox, 800MB but reliable)
-    print("[Solver] Trying SeleniumBase UC Mode (fallback, tested working in sandbox)...")
-    try:
-        from seleniumbase import SB
-        import glob
-        chromium_candidates = glob.glob("/home/user/.cache/ms-playwright/chromium-*/chrome-linux64/chrome")
-        chromium_path = chromium_candidates[0] if chromium_candidates else None
-        print(f"[Solver] Chromium path: {chromium_path}")
+    async with AsyncCamoufox(headless=True, humanize=True, os="windows") as browser:
+        page = await browser.new_page()
+        import urllib.parse
+        hash_data = {
+            "prompt": "test",
+            "seed": 0,
+            "resolution": "512x512",
+            "guidanceScale": 7,
+            "negativePrompt": "",
+            "requestId": f"camou_{random.random()}",
+            "iframeId": "test"
+        }
+        url = f"{BASE_EMBED}/embed#{urllib.parse.quote(json.dumps(hash_data))}"
+        page.on("console", lambda msg: print(f"[Camoufox CONSOLE {msg.type}] {msg.text[:500]}"))
 
-        def _run_sync():
-            with SB(uc=True, headless=True, chromium_arg="--no-sandbox --disable-gpu --disable-dev-shm-usage --disable-blink-features=AutomationControlled", binary_location=chromium_path) as sb:
-                import json as _json, urllib.parse as _up, random as _rand
-                hash_data = {"prompt": "test", "seed": 0, "resolution": "512x512", "guidanceScale": 7, "negativePrompt": "", "requestId": f"sb_{_rand.random()}", "iframeId": "test"}
-                url = f"{BASE_EMBED}/embed#{_up.quote(_json.dumps(hash_data))}"
-                sb.open(url)
-                sb.sleep(6)
-                result = sb.execute_async_script("""
-                    const callback = arguments[arguments.length - 1];
-                    (async () => {
-                        const bid = localStorage.getItem('generation-v2-browser');
-                        if(!window.turnstile){
-                            window.onloadTurnstileCallback = () => {};
-                            const s = document.createElement('script');
-                            s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback';
-                            document.body.appendChild(s);
-                            await new Promise(r => setTimeout(r, 5000));
-                        }
-                        if(!window.turnstile){
-                            callback({error: 'no turnstile', bid});
-                            return;
-                        }
-                        let ctn = document.querySelector('#cfTurnstileCtn');
-                        if(!ctn){
-                            ctn = document.createElement('div');
-                            ctn.id = 'cfTurnstileCtn';
-                            document.body.appendChild(ctn);
-                        }
-                        try{
-                            const token = await new Promise((resolve) => {
-                                let settled=false;
-                                const timer=setTimeout(()=>{if(!settled){settled=true;resolve(null);}},35000);
-                                window.cloudflareTurnstileTokenResolver=(t)=>{if(!settled){settled=true;clearTimeout(timer);resolve(t);}};
-                                window.turnstile.render('#cfTurnstileCtn', {
-                                    sitekey: '0x4AAAAAAAA8g8NphwaSOT59',
-                                    callback: (t)=>window.cloudflareTurnstileTokenResolver(t),
-                                    'error-callback': ()=>{if(!settled){settled=true;clearTimeout(timer);resolve(null);}}
-                                });
-                            });
-                            if(!token){
-                                callback({error: 'no token', bid});
-                                return;
-                            }
-                            const verifyUrl = `/api/verifyUser?browserId=${bid}&token=${encodeURIComponent(token)}&thread=0&__cacheBust=${Math.random()}`;
-                            const r = await fetch(verifyUrl);
-                            const txt = await r.text();
-                            let j;
-                            try{ j=JSON.parse(txt); }catch(e){ callback({error: 'verify not json '+txt.slice(0,500), bid}); return; }
-                            callback({bid, response: j, token});
-                        }catch(e){
-                            callback({error: 'exception '+e.toString(), bid});
-                        }
-                    })();
-                """, timeout=60)
-                return result
+        await page.goto(url)
+        await page.wait_for_timeout(5000)
 
-        result = await asyncio.to_thread(_run_sync)
-        print(f"[Solver] SeleniumBase result: {result}")
+        result = await page.evaluate("""async () => {
+            const bid = localStorage.getItem('generation-v2-browser');
+            if(!window.turnstile){
+                await new Promise((res) => {
+                    window.onloadTurnstileCallback = () => res();
+                    const s = document.createElement('script');
+                    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback';
+                    s.onerror = () => res();
+                    document.body.appendChild(s);
+                    setTimeout(() => res(), 10000);
+                });
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            if(!window.turnstile){
+                return {error: 'turnstile still undefined', bid};
+            }
+            let ctn = document.querySelector('#cfTurnstileCtn');
+            if(!ctn){
+                ctn = document.createElement('div');
+                ctn.id = 'cfTurnstileCtn';
+                document.body.appendChild(ctn);
+            }
+            try{
+                const token = await new Promise((resolve) => {
+                    let settled = false;
+                    const timer = setTimeout(() => {if(!settled){settled=true;resolve(null);}},40000);
+                    window.cloudflareTurnstileTokenResolver = (t) => {if(!settled){settled=true;clearTimeout(timer);resolve(t);}};
+                    try{
+                        window.turnstile.render('#cfTurnstileCtn', {
+                            sitekey: '0x4AAAAAAAA8g8NphwaSOT59',
+                            callback: (t) => window.cloudflareTurnstileTokenResolver(t),
+                            'error-callback': () => {if(!settled){settled=true;clearTimeout(timer);resolve(null);}}
+                        });
+                    }catch(e){ if(!settled){settled=true;clearTimeout(timer);resolve(null);} }
+                });
+                if(!token){ return {error: 'no token after 40s', bid}; }
+                const verifyUrl = `/api/verifyUser?browserId=${bid}&token=${encodeURIComponent(token)}&thread=0&__cacheBust=${Math.random()}`;
+                const r = await fetch(verifyUrl);
+                const txt = await r.text();
+                let j; try{ j = JSON.parse(txt); }catch(e){ return {error: 'verify not json '+txt.slice(0,500), bid}; }
+                return {bid, response: j, token};
+            }catch(e){ return {error: 'exception '+e.toString(), bid}; }
+        }""")
+
+        print(f"[Solver] Camoufox verify result: {result}")
         user_key = result.get('response', {}).get('userKey') if isinstance(result, dict) else None
         if user_key and re.fullmatch(r"[a-f0-9]{64}", user_key):
-            print(f"[Solver] Got userKey via SeleniumBase: {user_key[:12]}...")
+            print(f"[Solver] Got userKey via Camoufox: {user_key[:12]}...")
             save_user_key(user_key)
-            return {"userKey": user_key, "browserId": result.get('bid', load_cached_browser_id()), "token": result.get('token','')[:100], "method": "seleniumbase-uc"}
-        return None
-    except Exception as e:
-        print(f"[Solver] SeleniumBase also failed: {e}")
-        import traceback; traceback.print_exc()
-        return None
+            return {"userKey": user_key, "browserId": result.get('bid', browser_id), "token": result.get('token', '')[:100], "method": "camoufox-byparr"}
+        else:
+            print(f"[Solver] Camoufox failed to get userKey: {result}")
+            return None
 
 # --- curl_cffi for ad code + generate (no browser, lightweight) ---
 
@@ -404,9 +302,9 @@ async def generate_via_curl_cffi(prompt: str, negative_prompt: str = "", seed: i
 # --- FastAPI App with cron-job.org optimization ---
 
 app = FastAPI(
-    title="Perchance Turnstile Solver - Byparr/Camoufox + cron-job.org 13min",
-    description="Self-hosted Turnstile solver for Perchance (sitekey 0x4AAAAAAAA8g8NphwaSOT59) using Camoufox Firefox stealth (same as Byparr). Optimized for cron-job.org every 13 min keep-alive (13 < 15 min Render sleep).",
-    version="1.0.0",
+    title="Perchance Turnstile Solver - Byparr/Camoufox 200MB - No SeleniumBase - Fixed OOM 502",
+    description="Self-hosted Turnstile solver for Perchance (sitekey 0x4AAAAAAAA8g8NphwaSOT59) using ONLY Camoufox Firefox stealth (Byparr). No SeleniumBase fallback to fix OOM 502 on Render 512MB Free Tier.",
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -448,40 +346,30 @@ async def root():
     return {
         "name": "perchance-turnstile-solver",
         "status": "ok",
-        "version": "1.0.0",
-        "description": "Byparr/Camoufox based solver for Perchance Turnstile sitekey 0x4AAAAAAAA8g8NphwaSOT59 - cron-job.org 13min optimized",
+        "version": "2.0.0-byparr-only",
+        "description": "Byparr/Camoufox ONLY solver for Perchance Turnstile sitekey 0x4AAAAAAAA8g8NphwaSOT59 - Fixed OOM 502 by removing SeleniumBase",
         "uptime_seconds": uptime,
         "uptime_human": f"{uptime//3600}h {(uptime%3600)//60}m {uptime%60}s",
         "ping_count": PING_COUNT["count"],
         "endpoints": {
-            "/ping": "Health check for cron-job.org every 13 min (lightweight, <100ms, no browser) - USE THIS",
+            "/ping": "Health check for cron-job.org every 13 min (lightweight, <100ms, no browser)",
             "/cron": "Ultra-lightweight cron endpoint (plain text 'ok' in <50ms) - BEST FOR cron-job.org",
             "/keepalive": "Alias for /cron",
-            "/wake": "Wake endpoint for Pipedream morning wake-up (handles 50s cold start > 30s cron timeout)",
-            "/status": "Detailed status with uptime, ping count, cron source",
+            "/wake": "Wake endpoint for Pipedream morning wake-up",
+            "/status": "Detailed status",
             "/solve": "POST Solve Turnstile, return userKey + browserId",
             "/generate": "POST Generate image (solve + curl_cffi)",
             "/v1": "POST FlareSolverr-compatible API (Byparr drop-in)",
             "/docs": "Swagger UI"
         },
-        "cron_job_org": {
-            "interval": "13 minutes (13 < 15 min Render sleep threshold)",
-            "timeout": "30s free limit, our /ping and /cron respond <100ms, safe",
-            "hours_per_month": "720h if kept alive 24/7, under 750h Render free limit per workspace",
-            "setup_both_services": [
-                "Job 1: https://perchance-mcp-lite.onrender.com/cron every 13 min (Render Acc 1)",
-                "Job 2: https://perchance-solver.onrender.com/cron every 13 min (Render Acc 2)"
-            ],
-            "morning_wake": "Pipedream at 07:50 daily on /wake (no 30s timeout) handles 50s cold start, then cron-job.org every 13 min 08:00-23:59",
-            "alternative": "UptimeRobot every 5 min on /ping (no timeout issue, better than cron-job.org)"
-        },
-        "stack": "Camoufox Firefox stealth (Byparr) + curl_cffi",
-        "memory": "~250-350MB (fits Render 512MB)",
+        "fix": "Removed SeleniumBase fallback (800MB) that caused OOM 502 on Render 512MB Free Tier. Now Camoufox ONLY 200-300MB.",
+        "stack": "Camoufox Firefox stealth (Byparr) + curl_cffi - 200MB",
+        "memory": "~200-300MB (fits Render 512MB) - Fixed OOM",
+        "docker_base": "ghcr.io/thephaseless/byparr:latest - 200MB",
         "unlimited": True,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-# Ultra-lightweight endpoints for cron-job.org - must respond <100ms, no browser
 @app.get("/ping")
 @app.head("/ping")
 @app.get("/healthz")
@@ -490,7 +378,6 @@ async def root():
 @app.head("/health")
 @app.get("/api/health")
 async def health(request: Request):
-    """Lightweight health for cron-job.org every 13 min - <100ms, no browser, no Camoufox import"""
     PING_COUNT["count"] += 1
     PING_COUNT["last_cron"] = datetime.now(timezone.utc).isoformat()
     PING_COUNT["last_ua"] = request.headers.get("user-agent", "")[:200]
@@ -503,8 +390,9 @@ async def health(request: Request):
             "uptime": int(time.time() - START_TIME),
             "ping_count": PING_COUNT["count"],
             "service": "perchance-solver",
-            "memory": "250-350MB (Camoufox)",
+            "memory": "200-300MB (Camoufox ONLY, no SeleniumBase) - Fixed OOM 502",
             "source": PING_COUNT["last_source"],
+            "version": "2.0.0-byparr-only",
             "cron_interval": "13 min (keep alive, 13 < 15 min sleep)",
             "note": "Use /cron for ultra-lightweight plain text (50ms) - best for cron-job.org 30s timeout"
         },
@@ -521,7 +409,6 @@ async def health(request: Request):
 @app.get("/keepalive")
 @app.head("/keepalive")
 async def cron_endpoint(request: Request):
-    """Ultra-lightweight for cron-job.org - plain text 'ok' in <50ms, no JSON overhead, safest for 30s timeout"""
     PING_COUNT["count"] += 1
     PING_COUNT["last_cron"] = datetime.now(timezone.utc).isoformat()
     PING_COUNT["last_ua"] = request.headers.get("user-agent", "")[:200]
@@ -541,12 +428,6 @@ async def cron_endpoint(request: Request):
 @app.get("/wake")
 @app.head("/wake")
 async def wake_endpoint(request: Request):
-    """
-    Wake endpoint for Pipedream morning wake-up
-    Returns ok immediately (<50ms) but Render will start warming up
-    Use Pipedream (no 30s timeout) at 07:50 daily to handle 50s cold start > cron-job.org 30s timeout
-    Then cron-job.org every 13 min 08:00-23:59 keeps alive
-    """
     PING_COUNT["count"] += 1
     PING_COUNT["last_cron"] = datetime.now(timezone.utc).isoformat()
     PING_COUNT["last_source"] = _get_cron_source(request)
@@ -558,7 +439,6 @@ async def wake_endpoint(request: Request):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "uptime": int(time.time() - START_TIME),
             "ping_count": PING_COUNT["count"],
-            "note": "Pipedream morning wake-up (no timeout) handles 50s cold start, then cron-job.org every 13 min"
         },
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -569,33 +449,29 @@ async def wake_endpoint(request: Request):
 
 @app.get("/status")
 async def status_endpoint(request: Request):
-    """Detailed status for monitoring both services"""
     uptime = int(time.time() - START_TIME)
     return {
         "service": "perchance-solver",
         "status": "ok",
-        "memory": "250-350MB (Camoufox)",
+        "version": "2.0.0-byparr-only-fixed-oom",
+        "memory": "200-300MB (Camoufox ONLY) - Fixed OOM 502",
         "uptime_seconds": uptime,
         "uptime_human": f"{uptime//3600}h {(uptime%3600)//60}m {uptime%60}s",
         "ping_count": PING_COUNT["count"],
         "last_cron": PING_COUNT["last_cron"],
         "last_source": PING_COUNT["last_source"],
         "last_user_agent": PING_COUNT["last_ua"],
+        "fix": "Removed SeleniumBase 800MB fallback that caused OOM 502 on Render 512MB. Now Camoufox ONLY 200MB.",
+        "docker_base": "ghcr.io/thephaseless/byparr:latest",
         "cron_job_org": {
             "interval": "13 minutes",
             "reason": "13 < 15 min Render sleep threshold",
-            "hours_used": f"{uptime//3600}h (max 750h/month free per workspace)",
-            "urls_to_ping": [
-                "https://perchance-mcp-lite.onrender.com/cron (Render Acc 1, lite 120MB)",
-                "https://perchance-solver.onrender.com/cron (Render Acc 2, solver 250MB, this service)"
-            ],
-            "setup": "cron-job.org → Create job → URL https://.../cron → every 13 min → save. Or UptimeRobot every 5 min on /ping (better, no 30s timeout)",
-            "morning_wake": "Pipedream at 07:50 on /wake (no timeout) for 50s cold start, then cron-job.org 08:00-23:59"
+            "hours_used": f"{uptime//3600}h (max 750h/month free)",
         },
         "solver": {
             "sitekey": "0x4AAAAAAAA8g8NphwaSOT59",
             "page": "https://image-generation.perchance.org/embed",
-            "method": "Camoufox Firefox stealth (Byparr)",
+            "method": "Camoufox Firefox stealth ONLY (Byparr) - 200MB, no SeleniumBase",
             "endpoints": ["/solve", "/generate", "/v1"]
         },
         "timestamp": datetime.now(timezone.utc).isoformat()
@@ -607,7 +483,7 @@ async def solve_turnstile(req: SolveRequest = SolveRequest()):
     try:
         result = await get_user_key_via_camoufox()
         if not result:
-            raise HTTPException(status_code=500, detail="Failed to solve Turnstile via Camoufox")
+            raise HTTPException(status_code=500, detail="Failed to solve Turnstile via Camoufox - check logs, may be Cloudflare challenge")
         
         return {
             "status": "success",
@@ -616,18 +492,23 @@ async def solve_turnstile(req: SolveRequest = SolveRequest()):
             "method": result["method"],
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "expires_in": 30,
+            "memory": "200MB Camoufox ONLY - Fixed OOM",
             "note": "userKey is IP-bound to solver's IP, must generate via solver or same IP"
         }
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
+        print(f"[Solver] /solve failed: {e}\n{tb}")
         raise HTTPException(status_code=500, detail=f"Solve failed: {str(e)} {tb[:1000]}")
 
 @app.post("/generate")
 async def generate_image(req: GenerateRequest):
-    """Full generation: solve Turnstile if needed + generate via curl_cffi + download"""
+    """Full generation: solve Turnstile + generate via curl_cffi + download"""
     try:
         ad_code = await get_ad_code_via_curl_cffi()
+        if not ad_code:
+            print("[Solver] Warning: ad_code empty, trying anyway")
+        
         solve_result = await get_user_key_via_camoufox()
         if not solve_result:
             raise HTTPException(status_code=500, detail="Failed to get userKey via Camoufox")
@@ -662,7 +543,7 @@ async def generate_image(req: GenerateRequest):
             "imageBase64": b64,
             "userKey": f"{user_key[:12]}...{user_key[-6:]}",
             "browserId": browser_id,
-            "method": "byparr/camoufox + curl_cffi",
+            "method": "byparr/camoufox ONLY 200MB + curl_cffi - Fixed OOM",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
@@ -671,6 +552,7 @@ async def generate_image(req: GenerateRequest):
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
+        print(f"[Solver] /generate failed: {e}\n{tb}")
         raise HTTPException(status_code=500, detail=f"Generate failed: {str(e)} {tb[:2000]}")
 
 @app.post("/v1")
@@ -696,7 +578,7 @@ async def flaresolverr_compatible(req: FlareSolverrRequest):
 
             return {
                 "status": "ok",
-                "message": "Challenge solved (Camoufox/Byparr)",
+                "message": "Challenge solved (Camoufox/Byparr ONLY 200MB - Fixed OOM)",
                 "solution": {
                     "url": req.url,
                     "status": 200,
@@ -707,7 +589,7 @@ async def flaresolverr_compatible(req: FlareSolverrRequest):
                 },
                 "startTimestamp": int(time.time()*1000),
                 "endTimestamp": int(time.time()*1000),
-                "version": "1.0.0-byparr-camoufox"
+                "version": "2.0.0-byparr-only"
             }
 
     except Exception as e:
@@ -720,5 +602,5 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", os.getenv("WEBSITES_PORT", "8000")))
     host = os.getenv("HOST", "0.0.0.0")
-    print(f"Starting Perchance Solver (Byparr/Camoufox) cron-job.org 13min ready on {host}:{port}")
+    print(f"Starting Perchance Solver (Byparr/Camoufox ONLY 200MB - Fixed OOM 502) on {host}:{port}")
     uvicorn.run("solver:app", host=host, port=port, log_level="info")

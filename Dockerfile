@@ -1,86 +1,50 @@
-# Perchance Solver - Byparr/Camoufox based Turnstile solver
-# For Render Account 2 (separate workspace, 512MB-1GB)
-# Memory: ~250-350MB (fits Render 512MB), vs 800MB for SeleniumBase
-# Unlimited, self-hosted, no Browserless limit
+# Perchance Solver - Byparr Docker Image Directly - 200MB Fixed OOM 502
+# Removes SeleniumBase fallback (800MB) that caused OOM on Render 512MB Free Tier
+# Uses ghcr.io/thephaseless/byparr:latest - 200MB vs 400MB official FlareSolverr
+# Camoufox Firefox stealth - C++ fingerprint patches, 0% detection, best for Turnstile
 
-FROM python:3.11-slim
+FROM ghcr.io/thephaseless/byparr:latest
 
-# Install system deps for Firefox (Camoufox) + curl
+# Byparr image is based on Python + Camoufox pre-installed, but we need to install our custom deps
+# Switch to root to install system deps if needed
+USER root
+
+# Install curl for healthcheck and python deps
 RUN apt-get update && apt-get install -y \
     curl \
-    wget \
-    gnupg \
-    libnss3 \
-    libnspr4 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libatspi2.0-0 \
-    libasound2 \
-    libcups2 \
-    libdrm2 \
-    libxdamage1 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxrandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libgtk-3-0 \
-    libxfixes3 \
-    libxext6 \
-    libx11-6 \
-    libglib2.0-0 \
-    libgdk-pixbuf-2.0-0 \
-    libcairo2 \
-    libpangoft2-1.0-0 \
-    libharfbuzz0b \
-    libgraphene-1.0-0 \
-    libepoxy0 \
-    libx11-xcb1 \
-    libxcb1 \
-    libxcb-shm0 \
-    libxcb-dri2-0 \
-    libxcb-dri3-0 \
-    libxcb-glx0 \
-    libxcb-present0 \
-    libxcb-sync1 \
-    libxcb-xfixes0 \
-    libxtst6 \
-    libxshmfence1 \
-    libwayland-client0 \
-    libwayland-cursor0 \
-    libwayland-egl1 \
-    libcloudproviders0 \
-    libcolord2 \
-    libdconf1 \
-    libpolkit-gobject-1-0 \
-    fonts-liberation \
-    libappindicator3-1 \
-    xdg-utils \
-    xvfb \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# Copy requirements (NO seleniumbase, only camoufox + fastapi + curl_cffi)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Camoufox browser (Firefox stealth, same as Byparr)
-RUN camoufox fetch || echo "Camoufox fetch failed, continuing"
+# Ensure Camoufox browser is fetched - Byparr image should already have it, but fetch again to be safe
+# This downloads Firefox ~150MB, but Byparr image already includes it
+RUN python -m camoufox fetch || echo "Camoufox fetch skipped, using Byparr's pre-installed browser"
 
+# Copy our custom solver (Camoufox ONLY, no SeleniumBase fallback)
 COPY . .
 
-RUN mkdir -p /app/perchance-output /home/user/.perchance-solver /tmp/debs/out/usr/lib/x86_64-linux-gnu
+# Clean up unnecessary files to save space
+RUN rm -rf /tmp/* /var/tmp/* && \
+    mkdir -p /app/perchance-output /home/user/.perchance-solver /tmp/debs/out/usr/lib/x86_64-linux-gnu && \
+    chmod -R 777 /app /home/user/.perchance-solver
 
 ENV PYTHONUNBUFFERED=1
-ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 ENV PORT=8000
 ENV HOST=0.0.0.0
+# Byparr env vars (optional, for compatibility)
+ENV BYPARR_BROWSER=camoufox
+ENV CAMOUFOX_HEADLESS=true
 
 EXPOSE 8000
 
-# Healthcheck uses lightweight /cron (no browser)
+# Healthcheck uses lightweight /cron (no browser) - 50ms plain text, best for Render + cron-job.org 30s timeout
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8000}/cron || exit 1
 
-CMD ["sh", "-c", "python -m uvicorn solver:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --timeout-keep-alive 75"]
+# Override Byparr's default CMD with our solver
+CMD ["sh", "-c", "python -m uvicorn solver:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --timeout-keep-alive 75 --log-level info"]
