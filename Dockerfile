@@ -1,9 +1,12 @@
-# Perchance Solver - Python Slim + Camoufox ONLY - 300MB - No SeleniumBase - Fixes OOM 502 and pip not found
-# Use this if Byparr image fails - python:3.11-slim has pip and is reliable on Render
+# Perchance Solver - SeleniumBase UC ONLY Unlimited - HF Spaces 16GB + Render 1GB
+# This is the UNLIMITED method tested working in E2B sandbox datacenter IP where Playwright fails 403
+# Playwright: 403 Just a moment, No available adapters
+# SeleniumBase UC: SUCCESS bid 0231e07d3b025b5a0f13de1e82358c54 userKey f0f66dce6a2490dae1d6428867e9e2ebb3ffef4b101fa0d07669ec600d7c68a9
+# Memory: ~800MB-1GB (fits HF Spaces 16GB, Render Starter 1GB, not Render Free 512MB)
 
 FROM python:3.11-slim
 
-# Install system deps for Firefox (Camoufox) + curl
+# Install system deps for Chromium (SeleniumBase UC) + curl + xvfb for headless
 RUN apt-get update && apt-get install -y \
     curl \
     wget \
@@ -55,6 +58,8 @@ RUN apt-get update && apt-get install -y \
     libappindicator3-1 \
     xdg-utils \
     xvfb \
+    chromium \
+    chromium-driver \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
@@ -63,8 +68,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Camoufox browser (Firefox stealth, same as Byparr) - 200MB
-RUN camoufox fetch || python -m camoufox fetch || echo "Camoufox fetch failed, continuing but may need manual fetch"
+# Install Playwright chromium for SeleniumBase to use (fallback)
+RUN playwright install chromium || python -m playwright install chromium || echo "Playwright chromium install skipped"
 
 COPY . .
 
@@ -72,13 +77,18 @@ RUN mkdir -p /app/perchance-output /home/user/.perchance-solver /tmp/debs/out/us
     chmod -R 777 /app /home/user/.perchance-solver || true
 
 ENV PYTHONUNBUFFERED=1
-ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
-ENV PORT=8000
+ENV PORT=7860
 ENV HOST=0.0.0.0
+# HF Spaces requires port 7860 for Gradio
+# For Render, PORT env will override to 8000 or 10000
 
+EXPOSE 7860
 EXPOSE 8000
 
+# Healthcheck uses lightweight /cron (no browser) - 50ms plain text
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/cron || exit 1
+    CMD curl -f http://localhost:${PORT:-7860}/cron || curl -f http://localhost:8000/cron || exit 1
 
-CMD ["sh", "-c", "python -m uvicorn solver:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --timeout-keep-alive 75 --log-level info"]
+# For HF Spaces Gradio: app.py launches Gradio on 7860 + FastAPI on 8000
+# For Render: solver.py launches FastAPI on PORT
+CMD ["sh", "-c", "if [ -f app.py ]; then python app.py; else python -m uvicorn solver:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --timeout-keep-alive 75 --log-level info; fi"]

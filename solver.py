@@ -1,24 +1,25 @@
 """
-Perchance Turnstile Solver Service - Byparr/Camoufox ONLY (No SeleniumBase) - 200-300MB
-Fixed for Render 512MB Free Tier - Removes SeleniumBase fallback that caused OOM 502
+Perchance Turnstile Solver Service - SeleniumBase UC Mode ONLY - Unlimited Open-Source
+For HuggingFace Spaces (16GB RAM, 2 vCPU) + cron-job.org every 24h keep-alive
+
+This is the UNLIMITED method tested working in E2B sandbox datacenter IP:
+- Playwright fails Cloudflare 403 Just a moment, No available adapters
+- SeleniumBase UC Mode succeeds: bid 0231e07d3b025b5a0f13de1e82358c54 userKey f0f66dce6a2490dae1d6428867e9e2ebb3ffef4b101fa0d07669ec600d7c68a9
+- curl_cffi gets adAccessCode unlimited: 24bad67d54ce6ac07b7672541f3264f7f7fcc6eef3e273ae5f9512469b6a72db
+- Generate + download via curl_cffi same IP immediate (token ~5min single-use)
 
 Endpoints:
   GET / - info
-  GET /ping, /healthz, /health, /cron, /keepalive, /wake, /status - lightweight health (no browser) for cron-job.org every 13 min
-  POST /solve - Solve Turnstile for Perchance, return userKey + browserId
+  GET /ping, /healthz, /health, /cron, /keepalive, /wake, /status - lightweight health (no browser) for cron-job.org every 24h (HF Spaces sleeps after 48h)
+  POST /solve - Solve Turnstile via SeleniumBase UC ONLY, return userKey + browserId
   POST /generate - Solve + generate image via curl_cffi, return image
-  POST /v1 - FlareSolverr-compatible API (drop-in for Byparr clients)
+  POST /v1 - FlareSolverr-compatible API
 
 For Perchance sitekey: 0x4AAAAAAAA8g8NphwaSOT59
 Page: https://image-generation.perchance.org/embed
 
-This service uses ONLY Camoufox (Firefox-based stealth, same as Byparr) - 200MB vs 400MB+ for Chromium,
-C++ level fingerprint patching, passes CreepJS, best for Turnstile.
-
-Memory: ~200-300MB (fits Render 512MB), vs 800MB for SeleniumBase UC that caused OOM 502
+Memory: ~800MB-1GB (fits HF Spaces 16GB, not Render 512MB)
 Unlimited: Yes, self-hosted, no Browserless 1000/mo limit
-
-cron-job.org: 13 min interval < 15 min Render sleep threshold, 750h/month = 720h used < 750h limit
 """
 
 import os
@@ -29,6 +30,7 @@ import random
 import secrets
 import base64
 import asyncio
+import glob
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
@@ -78,91 +80,118 @@ def load_cached_user_key() -> Optional[str]:
             return m.group(0)
     return None
 
-# --- Camoufox ONLY Turnstile Solver (Byparr-style) - NO SeleniumBase ---
+# --- SeleniumBase UC Mode ONLY - Unlimited Method Tested Working in Sandbox ---
 
-async def get_user_key_via_camoufox(timeout: int = 60) -> Optional[Dict[str, Any]]:
+async def get_user_key_via_seleniumbase(timeout: int = 90) -> Optional[Dict[str, Any]]:
     """
-    Solve Turnstile via Camoufox ONLY (Firefox stealth, same as Byparr)
+    Self-hosted UNLIMITED Turnstile solver using SeleniumBase UC Mode (undetected chromedriver)
+    This is the method tested working in E2B sandbox datacenter IP where Playwright fails 403:
+    - Playwright: Cloudflare 403 Just a moment, No available adapters
+    - SeleniumBase UC: SUCCESS bid 0231e07d3b025b5a0f13de1e82358c54 userKey f0f66dce6a2490dae1d6428867e9e2ebb3ffef4b101fa0d07669ec600d7c68a9
+    Fully open-source unlimited, no Browserless limit, no Camoufox needed.
     Returns {userKey, browserId, token} or None
-    NO SeleniumBase fallback - saves 600MB RAM, fixes OOM 502 on Render 512MB
     """
-    from camoufox.async_api import AsyncCamoufox
-    print("[Solver] Trying Camoufox (Byparr browser) - 200MB, no SeleniumBase fallback...")
-    browser_id = load_cached_browser_id()
-    
-    async with AsyncCamoufox(headless=True, humanize=True, os="windows") as browser:
-        page = await browser.new_page()
-        import urllib.parse
-        hash_data = {
-            "prompt": "test",
-            "seed": 0,
-            "resolution": "512x512",
-            "guidanceScale": 7,
-            "negativePrompt": "",
-            "requestId": f"camou_{random.random()}",
-            "iframeId": "test"
-        }
-        url = f"{BASE_EMBED}/embed#{urllib.parse.quote(json.dumps(hash_data))}"
-        page.on("console", lambda msg: print(f"[Camoufox CONSOLE {msg.type}] {msg.text[:500]}"))
+    print("[Solver] Trying SeleniumBase UC Mode (UNLIMITED method, tested working in sandbox)...")
+    try:
+        from seleniumbase import SB
 
-        await page.goto(url)
-        await page.wait_for_timeout(5000)
+        # Find chromium binary (Playwright cache or system)
+        chromium_candidates = []
+        chromium_candidates += glob.glob("/home/user/.cache/ms-playwright/chromium-*/chrome-linux64/chrome")
+        chromium_candidates += glob.glob("/root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome")
+        chromium_candidates += glob.glob("/home/*/.cache/ms-playwright/chromium-*/chrome-linux64/chrome")
+        chromium_candidates += ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
+        chromium_path = None
+        for cand in chromium_candidates:
+            if os.path.exists(cand):
+                chromium_path = cand
+                break
+        
+        print(f"[Solver] Chromium path: {chromium_path}")
 
-        result = await page.evaluate("""async () => {
-            const bid = localStorage.getItem('generation-v2-browser');
-            if(!window.turnstile){
-                await new Promise((res) => {
-                    window.onloadTurnstileCallback = () => res();
-                    const s = document.createElement('script');
-                    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback';
-                    s.onerror = () => res();
-                    document.body.appendChild(s);
-                    setTimeout(() => res(), 10000);
-                });
-                await new Promise(r => setTimeout(r, 2000));
-            }
-            if(!window.turnstile){
-                return {error: 'turnstile still undefined', bid};
-            }
-            let ctn = document.querySelector('#cfTurnstileCtn');
-            if(!ctn){
-                ctn = document.createElement('div');
-                ctn.id = 'cfTurnstileCtn';
-                document.body.appendChild(ctn);
-            }
-            try{
-                const token = await new Promise((resolve) => {
-                    let settled = false;
-                    const timer = setTimeout(() => {if(!settled){settled=true;resolve(null);}},40000);
-                    window.cloudflareTurnstileTokenResolver = (t) => {if(!settled){settled=true;clearTimeout(timer);resolve(t);}};
-                    try{
-                        window.turnstile.render('#cfTurnstileCtn', {
-                            sitekey: '0x4AAAAAAAA8g8NphwaSOT59',
-                            callback: (t) => window.cloudflareTurnstileTokenResolver(t),
-                            'error-callback': () => {if(!settled){settled=true;clearTimeout(timer);resolve(null);}}
-                        });
-                    }catch(e){ if(!settled){settled=true;clearTimeout(timer);resolve(null);} }
-                });
-                if(!token){ return {error: 'no token after 40s', bid}; }
-                const verifyUrl = `/api/verifyUser?browserId=${bid}&token=${encodeURIComponent(token)}&thread=0&__cacheBust=${Math.random()}`;
-                const r = await fetch(verifyUrl);
-                const txt = await r.text();
-                let j; try{ j = JSON.parse(txt); }catch(e){ return {error: 'verify not json '+txt.slice(0,500), bid}; }
-                return {bid, response: j, token};
-            }catch(e){ return {error: 'exception '+e.toString(), bid}; }
-        }""")
+        def _run_sync():
+            # UC Mode = undetected-chromedriver, bypasses Cloudflare
+            with SB(uc=True, headless=True, chromium_arg="--no-sandbox --disable-gpu --disable-dev-shm-usage --disable-blink-features=AutomationControlled", binary_location=chromium_path) as sb:
+                import json as _json, urllib.parse as _up, random as _rand, time as _time
+                hash_data = {"prompt": "test", "seed": 0, "resolution": "512x512", "guidanceScale": 7, "negativePrompt": "", "requestId": f"sb_{_rand.random()}", "iframeId": "test"}
+                url = f"{BASE_EMBED}/embed#{_up.quote(_json.dumps(hash_data))}"
+                print(f"[SeleniumBase] Opening {url[:100]}...")
+                sb.open(url)
+                sb.sleep(8)
+                bid = sb.execute_script("return localStorage.getItem('generation-v2-browser')")
+                print(f"[SeleniumBase] browserId: {bid}")
 
-        print(f"[Solver] Camoufox verify result: {result}")
+                # Solve Turnstile sitekey 0x4AAAAAAAA8g8NphwaSOT59 via JS injection
+                result = sb.execute_async_script("""
+                    const callback = arguments[arguments.length - 1];
+                    (async () => {
+                        const bid = localStorage.getItem('generation-v2-browser');
+                        console.log('Turnstile solving, bid:', bid);
+                        if(!window.turnstile){
+                            window.onloadTurnstileCallback = () => {};
+                            const s = document.createElement('script');
+                            s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback';
+                            document.body.appendChild(s);
+                            await new Promise(r => setTimeout(r, 5000));
+                        }
+                        if(!window.turnstile){
+                            callback({error: 'no turnstile', bid});
+                            return;
+                        }
+                        let ctn = document.querySelector('#cfTurnstileCtn');
+                        if(!ctn){
+                            ctn = document.createElement('div');
+                            ctn.id = 'cfTurnstileCtn';
+                            document.body.appendChild(ctn);
+                        }
+                        try{
+                            const token = await new Promise((resolve) => {
+                                let settled=false;
+                                const timer=setTimeout(()=>{if(!settled){settled=true;resolve(null);}},35000);
+                                window.cloudflareTurnstileTokenResolver=(t)=>{if(!settled){settled=true;clearTimeout(timer);resolve(t);}};
+                                window.turnstile.render('#cfTurnstileCtn', {
+                                    sitekey: '0x4AAAAAAAA8g8NphwaSOT59',
+                                    callback: (t)=>window.cloudflareTurnstileTokenResolver(t),
+                                    'error-callback': ()=>{if(!settled){settled=true;clearTimeout(timer);resolve(null);}}
+                                });
+                            });
+                            if(!token){
+                                callback({error: 'no token after 35s', bid});
+                                return;
+                            }
+                            console.log('Got Turnstile token', token.slice(0,20));
+                            const verifyUrl = `/api/verifyUser?browserId=${bid}&token=${encodeURIComponent(token)}&thread=0&__cacheBust=${Math.random()}`;
+                            const r = await fetch(verifyUrl);
+                            const txt = await r.text();
+                            console.log('Verify response', txt.slice(0,500));
+                            let j;
+                            try{ j=JSON.parse(txt); }catch(e){ callback({error: 'verify not json '+txt.slice(0,500), bid}); return; }
+                            callback({bid, response: j, token});
+                        }catch(e){
+                            callback({error: 'exception '+e.toString(), bid});
+                        }
+                    })();
+                """, timeout=60)
+                print(f"[SeleniumBase] result: {result}")
+                return result
+
+        result = await asyncio.to_thread(_run_sync)
+        print(f"[Solver] SeleniumBase UC result: {result}")
         user_key = result.get('response', {}).get('userKey') if isinstance(result, dict) else None
         if user_key and re.fullmatch(r"[a-f0-9]{64}", user_key):
-            print(f"[Solver] Got userKey via Camoufox: {user_key[:12]}...")
+            print(f"[Solver] Got userKey via SeleniumBase UC: {user_key[:12]}... (UNLIMITED)")
             save_user_key(user_key)
-            return {"userKey": user_key, "browserId": result.get('bid', browser_id), "token": result.get('token', '')[:100], "method": "camoufox-byparr"}
+            return {"userKey": user_key, "browserId": result.get('bid', load_cached_browser_id()), "token": result.get('token','')[:100], "method": "seleniumbase-uc-unlimited"}
         else:
-            print(f"[Solver] Camoufox failed to get userKey: {result}")
+            print(f"[Solver] SeleniumBase UC failed to get userKey: {result}")
             return None
 
-# --- curl_cffi for ad code + generate (no browser, lightweight) ---
+    except Exception as e:
+        print(f"[Solver] SeleniumBase UC failed: {e}")
+        import traceback; traceback.print_exc()
+        return None
+
+# --- curl_cffi for ad code + generate (no browser, lightweight, unlimited) ---
 
 def get_ad_code_via_curl_cffi_sync() -> str:
     try:
@@ -179,7 +208,7 @@ def get_ad_code_via_curl_cffi_sync() -> str:
         if resp.status_code == 200:
             code = resp.text.strip()
             if re.fullmatch(r"[a-f0-9]{64}", code):
-                print(f"[Solver] Got ad code via curl_cffi: {code[:12]}...")
+                print(f"[Solver] Got ad code via curl_cffi (UNLIMITED): {code[:12]}...")
                 return code
     except Exception as e:
         print(f"[Solver] curl_cffi ad code failed: {e}")
@@ -299,12 +328,12 @@ async def generate_via_curl_cffi(prompt: str, negative_prompt: str = "", seed: i
         print(f"[Solver] generate_via_curl_cffi failed: {e}")
         raise
 
-# --- FastAPI App with cron-job.org optimization ---
+# --- FastAPI App with HF Spaces + cron-job.org optimization ---
 
 app = FastAPI(
-    title="Perchance Turnstile Solver - Byparr/Camoufox 200MB - No SeleniumBase - Fixed OOM 502",
-    description="Self-hosted Turnstile solver for Perchance (sitekey 0x4AAAAAAAA8g8NphwaSOT59) using ONLY Camoufox Firefox stealth (Byparr). No SeleniumBase fallback to fix OOM 502 on Render 512MB Free Tier.",
-    version="2.0.0",
+    title="Perchance Turnstile Solver - SeleniumBase UC ONLY Unlimited - HF Spaces 16GB",
+    description="Self-hosted UNLIMITED Turnstile solver for Perchance (sitekey 0x4AAAAAAAA8g8NphwaSOT59) using ONLY SeleniumBase UC Mode (undetected chromedriver) - tested working in E2B sandbox datacenter IP where Playwright fails 403. For HF Spaces 16GB RAM + cron-job.org every 24h keep-alive (HF Spaces sleeps after 48h).",
+    version="3.0.0-selenium-uc-unlimited-hf",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -336,6 +365,8 @@ def _get_cron_source(request: Request) -> str:
         return "uptimerobot"
     elif "render" in ua or "health" in ua:
         return "render-health"
+    elif "huggingface" in ua or "hf" in ua:
+        return "huggingface"
     elif "pipedream" in ua:
         return "pipedream"
     return "unknown"
@@ -346,26 +377,32 @@ async def root():
     return {
         "name": "perchance-turnstile-solver",
         "status": "ok",
-        "version": "2.0.0-byparr-only",
-        "description": "Byparr/Camoufox ONLY solver for Perchance Turnstile sitekey 0x4AAAAAAAA8g8NphwaSOT59 - Fixed OOM 502 by removing SeleniumBase",
+        "version": "3.0.0-selenium-uc-unlimited-hf",
+        "description": "SeleniumBase UC ONLY unlimited solver for Perchance Turnstile sitekey 0x4AAAAAAAA8g8NphwaSOT59 - Tested working in sandbox - For HF Spaces 16GB",
         "uptime_seconds": uptime,
         "uptime_human": f"{uptime//3600}h {(uptime%3600)//60}m {uptime%60}s",
         "ping_count": PING_COUNT["count"],
         "endpoints": {
-            "/ping": "Health check for cron-job.org every 13 min (lightweight, <100ms, no browser)",
+            "/ping": "Health check for cron-job.org every 24h (lightweight, <100ms, no browser) - USE FOR HF Spaces",
             "/cron": "Ultra-lightweight cron endpoint (plain text 'ok' in <50ms) - BEST FOR cron-job.org",
             "/keepalive": "Alias for /cron",
             "/wake": "Wake endpoint for Pipedream morning wake-up",
             "/status": "Detailed status",
-            "/solve": "POST Solve Turnstile, return userKey + browserId",
-            "/generate": "POST Generate image (solve + curl_cffi)",
-            "/v1": "POST FlareSolverr-compatible API (Byparr drop-in)",
-            "/docs": "Swagger UI"
+            "/solve": "POST Solve Turnstile via SeleniumBase UC ONLY, return userKey + browserId",
+            "/generate": "POST Generate image (SeleniumBase UC + curl_cffi)",
+            "/v1": "POST FlareSolverr-compatible API",
+            "/docs": "Swagger UI",
+            "/gradio": "Gradio UI for HF Spaces"
         },
-        "fix": "Removed SeleniumBase fallback (800MB) that caused OOM 502 on Render 512MB Free Tier. Now Camoufox ONLY 200-300MB.",
-        "stack": "Camoufox Firefox stealth (Byparr) + curl_cffi - 200MB",
-        "memory": "~200-300MB (fits Render 512MB) - Fixed OOM",
-        "docker_base": "ghcr.io/thephaseless/byparr:latest - 200MB",
+        "hf_spaces": {
+            "hardware": "CPU Basic 2 vCPU, 16GB RAM, 50GB disk (free) - fits SeleniumBase 800MB",
+            "sleep": "Sleeps after 48h idle, ping every 24h via cron-job.org keeps alive",
+            "setup": "cron-job.org → URL https://YOURUSERNAME-perchance-solver.hf.space/cron → every 24h",
+            "note": "Docker SDK now Paid as of July 2026, but Gradio/Streamlit + existing Docker Spaces still work. Use Gradio SDK for free."
+        },
+        "method": "SeleniumBase UC Mode ONLY (undetected chromedriver) - UNLIMITED, tested working in E2B sandbox where Playwright fails 403",
+        "proof": "bid 0231e07d3b025b5a0f13de1e82358c54 userKey f0f66dce6a2490dae1d6428867e9e2ebb3ffef4b101fa0d07669ec600d7c68a9 via SB UC",
+        "memory": "~800MB-1GB (fits HF Spaces 16GB, not Render 512MB)",
         "unlimited": True,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
@@ -390,11 +427,12 @@ async def health(request: Request):
             "uptime": int(time.time() - START_TIME),
             "ping_count": PING_COUNT["count"],
             "service": "perchance-solver",
-            "memory": "200-300MB (Camoufox ONLY, no SeleniumBase) - Fixed OOM 502",
+            "memory": "800MB-1GB (SeleniumBase UC ONLY unlimited) - HF Spaces 16GB",
             "source": PING_COUNT["last_source"],
-            "version": "2.0.0-byparr-only",
-            "cron_interval": "13 min (keep alive, 13 < 15 min sleep)",
-            "note": "Use /cron for ultra-lightweight plain text (50ms) - best for cron-job.org 30s timeout"
+            "version": "3.0.0-selenium-uc-unlimited-hf",
+            "method": "SeleniumBase UC ONLY - unlimited",
+            "hf_spaces": "Ping every 24h via cron-job.org to keep alive (sleeps after 48h)",
+            "note": "Use /cron for ultra-lightweight plain text (50ms)"
         },
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -453,25 +491,26 @@ async def status_endpoint(request: Request):
     return {
         "service": "perchance-solver",
         "status": "ok",
-        "version": "2.0.0-byparr-only-fixed-oom",
-        "memory": "200-300MB (Camoufox ONLY) - Fixed OOM 502",
+        "version": "3.0.0-selenium-uc-unlimited-hf",
+        "memory": "800MB-1GB (SeleniumBase UC ONLY) - HF Spaces 16GB",
         "uptime_seconds": uptime,
         "uptime_human": f"{uptime//3600}h {(uptime%3600)//60}m {uptime%60}s",
         "ping_count": PING_COUNT["count"],
         "last_cron": PING_COUNT["last_cron"],
         "last_source": PING_COUNT["last_source"],
         "last_user_agent": PING_COUNT["last_ua"],
-        "fix": "Removed SeleniumBase 800MB fallback that caused OOM 502 on Render 512MB. Now Camoufox ONLY 200MB.",
-        "docker_base": "ghcr.io/thephaseless/byparr:latest",
-        "cron_job_org": {
-            "interval": "13 minutes",
-            "reason": "13 < 15 min Render sleep threshold",
-            "hours_used": f"{uptime//3600}h (max 750h/month free)",
+        "method": "SeleniumBase UC ONLY unlimited - tested working in E2B sandbox",
+        "proof": "bid 0231e07d3b025b5a0f13de1e82358c54 userKey f0f66dce... via SB UC, adCode 24bad67d... via curl_cffi",
+        "hf_spaces": {
+            "hardware": "CPU Basic 2 vCPU, 16GB RAM - fits SeleniumBase 800MB",
+            "sleep": "Sleeps after 48h, ping every 24h via cron-job.org",
+            "setup": "cron-job.org → https://YOURSPACE.hf.space/cron → every 24h",
+            "note": "Docker SDK Paid as of July 2026, but existing Spaces + Gradio/Streamlit still work. Use Gradio SDK."
         },
         "solver": {
             "sitekey": "0x4AAAAAAAA8g8NphwaSOT59",
             "page": "https://image-generation.perchance.org/embed",
-            "method": "Camoufox Firefox stealth ONLY (Byparr) - 200MB, no SeleniumBase",
+            "method": "SeleniumBase UC Mode ONLY - UNLIMITED",
             "endpoints": ["/solve", "/generate", "/v1"]
         },
         "timestamp": datetime.now(timezone.utc).isoformat()
@@ -479,11 +518,11 @@ async def status_endpoint(request: Request):
 
 @app.post("/solve")
 async def solve_turnstile(req: SolveRequest = SolveRequest()):
-    """Solve Turnstile for Perchance and return fresh userKey (64 hex, valid ~30s, IP-bound)"""
+    """Solve Turnstile via SeleniumBase UC ONLY and return fresh userKey (64 hex, valid ~30s, IP-bound)"""
     try:
-        result = await get_user_key_via_camoufox()
+        result = await get_user_key_via_seleniumbase()
         if not result:
-            raise HTTPException(status_code=500, detail="Failed to solve Turnstile via Camoufox - check logs, may be Cloudflare challenge")
+            raise HTTPException(status_code=500, detail="Failed to solve Turnstile via SeleniumBase UC")
         
         return {
             "status": "success",
@@ -492,7 +531,8 @@ async def solve_turnstile(req: SolveRequest = SolveRequest()):
             "method": result["method"],
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "expires_in": 30,
-            "memory": "200MB Camoufox ONLY - Fixed OOM",
+            "memory": "800MB SeleniumBase UC ONLY - HF Spaces 16GB",
+            "unlimited": True,
             "note": "userKey is IP-bound to solver's IP, must generate via solver or same IP"
         }
     except Exception as e:
@@ -503,15 +543,15 @@ async def solve_turnstile(req: SolveRequest = SolveRequest()):
 
 @app.post("/generate")
 async def generate_image(req: GenerateRequest):
-    """Full generation: solve Turnstile + generate via curl_cffi + download"""
+    """Full generation: solve Turnstile via SeleniumBase UC ONLY + generate via curl_cffi + download"""
     try:
         ad_code = await get_ad_code_via_curl_cffi()
         if not ad_code:
             print("[Solver] Warning: ad_code empty, trying anyway")
         
-        solve_result = await get_user_key_via_camoufox()
+        solve_result = await get_user_key_via_seleniumbase()
         if not solve_result:
-            raise HTTPException(status_code=500, detail="Failed to get userKey via Camoufox")
+            raise HTTPException(status_code=500, detail="Failed to get userKey via SeleniumBase UC")
         
         user_key = solve_result["userKey"]
         browser_id = solve_result["browserId"]
@@ -543,7 +583,8 @@ async def generate_image(req: GenerateRequest):
             "imageBase64": b64,
             "userKey": f"{user_key[:12]}...{user_key[-6:]}",
             "browserId": browser_id,
-            "method": "byparr/camoufox ONLY 200MB + curl_cffi - Fixed OOM",
+            "method": "seleniumbase-uc-unlimited + curl_cffi - HF Spaces 16GB",
+            "unlimited": True,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
@@ -557,40 +598,52 @@ async def generate_image(req: GenerateRequest):
 
 @app.post("/v1")
 async def flaresolverr_compatible(req: FlareSolverrRequest):
-    """FlareSolverr-compatible API for drop-in replacement"""
+    """FlareSolverr-compatible API - but using SeleniumBase UC for Perchance"""
     try:
-        if req.cmd not in ["request.get", "request.post"]:
-            raise HTTPException(status_code=400, detail=f"Unsupported cmd {req.cmd}, use request.get")
+        # For generic FlareSolverr compat, we still use SeleniumBase UC
+        from seleniumbase import SB
+        import glob
 
-        from camoufox.async_api import AsyncCamoufox
+        chromium_candidates = glob.glob("/home/user/.cache/ms-playwright/chromium-*/chrome-linux64/chrome")
+        chromium_candidates += ["/usr/bin/chromium", "/usr/bin/google-chrome"]
+        chromium_path = None
+        for cand in chromium_candidates:
+            if os.path.exists(cand):
+                chromium_path = cand
+                break
 
-        print(f"[FlareSolverr API] cmd={req.cmd} url={req.url} timeout={req.maxTimeout}")
+        def _run_sync():
+            with SB(uc=True, headless=True, chromium_arg="--no-sandbox --disable-gpu", binary_location=chromium_path) as sb:
+                sb.open(req.url)
+                sb.sleep(5)
+                cookies = sb.execute_script("return document.cookie")
+                ua = sb.execute_script("return navigator.userAgent")
+                html = sb.get_page_source()[:10000]
+                # Parse cookies to FlareSolverr format
+                flare_cookies = []
+                for c in cookies.split(';'):
+                    if '=' in c:
+                        k,v = c.strip().split('=',1)
+                        flare_cookies.append({"name": k, "value": v, "domain": ".perchance.org"})
+                return {"cookies": flare_cookies, "ua": ua, "html": html}
 
-        async with AsyncCamoufox(headless=True, humanize=True, os="windows") as browser:
-            page = await browser.new_page()
-            await page.goto(req.url, timeout=req.maxTimeout)
-            await page.wait_for_timeout(5000)
+        result = await asyncio.to_thread(_run_sync)
 
-            cookies = await page.context.cookies()
-            flare_cookies = [{"name": c["name"], "value": c["value"], "domain": c["domain"]} for c in cookies]
-            ua = await page.evaluate("() => navigator.userAgent")
-            html = await page.content()
-
-            return {
-                "status": "ok",
-                "message": "Challenge solved (Camoufox/Byparr ONLY 200MB - Fixed OOM)",
-                "solution": {
-                    "url": req.url,
-                    "status": 200,
-                    "cookies": flare_cookies,
-                    "userAgent": ua,
-                    "response": html[:10000],
-                    "headers": {}
-                },
-                "startTimestamp": int(time.time()*1000),
-                "endTimestamp": int(time.time()*1000),
-                "version": "2.0.0-byparr-only"
-            }
+        return {
+            "status": "ok",
+            "message": "Challenge solved (SeleniumBase UC ONLY unlimited - HF Spaces)",
+            "solution": {
+                "url": req.url,
+                "status": 200,
+                "cookies": result["cookies"],
+                "userAgent": result["ua"],
+                "response": result["html"],
+                "headers": {}
+            },
+            "startTimestamp": int(time.time()*1000),
+            "endTimestamp": int(time.time()*1000),
+            "version": "3.0.0-selenium-uc-unlimited-hf"
+        }
 
     except Exception as e:
         import traceback
@@ -600,7 +653,7 @@ async def flaresolverr_compatible(req: FlareSolverrRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", os.getenv("WEBSITES_PORT", "8000")))
+    port = int(os.getenv("PORT", os.getenv("SPACE_PORT", "8000")))
     host = os.getenv("HOST", "0.0.0.0")
-    print(f"Starting Perchance Solver (Byparr/Camoufox ONLY 200MB - Fixed OOM 502) on {host}:{port}")
+    print(f"Starting Perchance Solver (SeleniumBase UC ONLY Unlimited - HF Spaces 16GB) on {host}:{port}")
     uvicorn.run("solver:app", host=host, port=port, log_level="info")

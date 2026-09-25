@@ -1,7 +1,21 @@
-# Fixed for Render 512MB Free Tier - NO SeleniumBase (800MB OOM) - Camoufox ONLY 200MB
+# HF Spaces Gradio + SeleniumBase UC ONLY Unlimited - 16GB RAM
+# SeleniumBase UC Mode is the unlimited method tested working in E2B sandbox datacenter IP
+# Playwright fails 403, SeleniumBase UC succeeds with bid 0231e07d... userKey f0f66dce...
+# For HF Spaces free tier: CPU Basic 2 vCPU, 16GB RAM fits SeleniumBase 800MB
+# Keep alive via cron-job.org every 24h pinging /cron (HF sleeps after 48h)
+
+# Core solver - SeleniumBase UC ONLY (unlimited)
+seleniumbase>=4.0.0
+curl_cffi>=0.11.0
+httpx>=0.27.0
+
+# FastAPI for /cron /ping /status /solve /generate endpoints
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
-curl_cffi>=0.11.0
-camoufox>=0.4.0
-httpx>=0.27.0
 pydantic>=2.0.0
+
+# Gradio for HF Spaces UI (free tier Gradio SDK)
+gradio>=4.0.0
+
+# Optional: For HF Spaces secrets and better logging
+python-multipart>=0.0.6
